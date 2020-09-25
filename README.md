@@ -7,6 +7,7 @@ Algunos puntos importantes a considerar:
 - Tendrás hasta el jueves 1 de octubre a las 23:59 para enviar tus respuestas al desafío.
 - Solo se aceptarán Jupyter notebook (recomendado), R Markdown o R Notebook como formatos de entrega y solamente python o R. La idea es que sea fácil para nosotros correr lo que ustedes escribieron (y que sea reproducible).
 - Habilitamos un canal en Gitter para que todos puedan colaborar entre sí. Ingresa en https://gitter.im/desafioSpike/energia (se requiere cuenta github o gitlab).
+- Entrega tu desafío acá: https://forms.gle/rqgMUFMQ5f4Ja1zk9
 - Finalmente, ¡lee bien las instrucciones! 
 
 
