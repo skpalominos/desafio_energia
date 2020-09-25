@@ -99,10 +99,10 @@ Datos de clima a nivel de subestación y día (cada fila es una subestación y u
 
 #### 1. Costos marginales
 
-+ Carga el archivo `costo_marginal_real.csv`Estos son los costos marginales reales observados. Cuántas barras hay en esta base? (usa los valores únicos de la variable `barra_mnemotecnico`_)
++ Carga el archivo `costo_marginal_real.csv`Estos son los costos marginales reales observados.
 + Carga el archivo `costo_marginal_programado.csv`. Estos son los costos marginales previstos por el sistema. 
 + Haz un merge del costos marginal real con el costo marginal programado a nivel de barra (*Ayuda: la columna de join no se llama igual en ambas bases! Los datos venían así del SIC *). Llama a esta nueva base `costo_marginal` 
-+ Realiza un análisis exploratorio de la base resultante. ¿Qué puedes decir de las distintas variables? ¿Cómo distribuyen? En particular analiza las barras (`barra_mnemotecnico`_). ¿Para cuántas barras se programa el costo? ¿Qué porcentaje es del total de barras que puedes observar en la base?
++ Realiza un análisis exploratorio de la base resultante. ¿Qué puedes decir de las distintas variables? ¿Cómo distribuyen? En particular analiza las barras (`barra_mnemotecnico`). ¿Para cuántas barras se programa el costo? ¿Qué porcentaje es del total de barras que puedes observar en la base?
 
 #### 2. Construcción de variables
 
