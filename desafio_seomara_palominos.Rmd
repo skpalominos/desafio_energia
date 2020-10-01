@@ -1,0 +1,894 @@
+---
+title: "Desafío Energía"
+author: "Seomara Palominos Gambra"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Carga de librerias**
+
+```{r ,echo=TRUE,results='hide',message=FALSE}
+rm(list = ls())
+# preprocessing
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(lubridate)
+library(stats)
+library(bit64)
+library(purrr)
+
+# visualizaciones
+library(ggplot2)
+library(plotly)
+library(cowplot)
+library(kableExtra)
+theme_set(theme_grey())
+
+# models
+library(h2o)
+library(scorecard)
+library(InformationValue)
+library(ROCit)
+
+#require(devtools)
+#install_version("h2o", version = "3.30.0.1", repos = "http://cran.us.r-project.org")
+```
+
+## P1 - Costos Marginales
+
+### Lectura datasets 
+
+```{r,echo=TRUE}
+cm_real <- fread('~/Desktop/test/files/costo_marginal_real.csv')
+cm_prog <- fread('~/Desktop/test/files/costo_marginal_programado.csv')
+
+# Eliminar datos con id duplicado -----------------------------------------
+
+cm_real <- cm_real %>% group_by(barra_mnemotecnico,fecha,hora) %>% slice(1)
+cm_prog <- cm_prog %>% group_by(mnemotecnico_barra,fecha,hora) %>% slice(1)
+```
+
+A continuación se presenta una visualizacion de las bases de datos 
+
+**COSTO MARGINAL REAL**
+
+```{r ,echo=FALSE}
+cm_real %>% arrange(desc(barra_mnemotecnico)) %>% head() %>% head() %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>% scroll_box(width = "100%")
+```
+
+**COSTO MARGINAL PROGRAMADO**
+
+```{r ,echo=FALSE}
+cm_prog %>% arrange(desc(mnemotecnico_barra)) %>% head() %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+
+### Join datasets
+
+Para ello se hara un left join de las base de datos de costo marginal real y costo marginal programado usando como llave primaria el mnemotecnico de las barras, la fechas y la hora.
+
+```{r ,echo=TRUE}
+costo_marginal <- cm_real %>% left_join(cm_prog,by=c('barra_mnemotecnico'='mnemotecnico_barra','fecha','hora')) %>% data.table()
+```
+
+```{r ,echo=FALSE,include=FALSE}
+rm(cm_prog);rm(cm_real);gc()
+```
+
+La base de datos resultante esta dada por:
+
+```{r ,echo=FALSE}
+head(costo_marginal) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+### Analisis Exploratorio base resultante
+
+#### Variables Númericas
+
+**Histograma Variables**
+
+```{r, echo=TRUE,warning=FALSE}
+hist <- function(df,X,title,xname){
+ ggplot(df, aes(x=X))+geom_histogram(color="black", fill="white")+
+ ggtitle(paste0("Histograma ",title))+xlab(xname)
+}
+
+h1 <- hist(costo_marginal,costo_marginal$costo_en_pesos,"CM real en pesos","costo_en_pesos")
+h2 <- hist(costo_marginal,costo_marginal$costo,"CM programado en pesos","costo")
+plot_grid(h1,h2)
+```
+
+Según el histograma tanto el costro marginal real como el programado poseen una distribución asimétrica positiva. 
+
+
+**Summary**
+
+```{r,echo=TRUE,warning=FALSE}
+costo_marginal %>% select(costo,costo_en_dolares,costo_en_pesos) %>% summary()
+```
+
+Por otro lado podemos visualizar que tanto la mediana como la media de los costros programados y reales son similares, sin embargo el costo programado no se encuentra disponible para todas las observaciones del dataset. 
+
+En la siguiente tabla podemos observar el número de observaciones para las cuales existe un costo programado y el porcentaje del total al cual corresponden dichas observaciones:
+
+**Número de barras para las cual se programa el costo**
+
+```{r ,echo=FALSE}
+M <- matrix(ncol=3,nrow=1)
+colnames(M) <- c("Núm obs total","Núm obs con costo programado","% Casos con costo programado")
+M[1,1] <- c(nrow(costo_marginal))
+M[1,2] <- c(sum(!is.na(costo_marginal$costo)))
+M[1,3] <- round(M[1,2]/M[1,1],3)*100
+
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+#### Codigo Barra
+
+A continuación se presenta el analisis de la distribución del número de veces que se repite cada tipo de barra en el dataset:
+
+```{r, echo=TRUE}
+dist_barra <- costo_marginal[,.("N"=.N),by="barra_mnemotecnico"]
+setorder(dist_barra,-N)
+dist_barra$N %>% summary()
+```
+
+Se puede visualizar que la minima cantidad de veces que se repite una barra en el dataset son 720 veces la cual corresponde a la barra BA01G460SE002G460. Por otro lado, las barra que más se repiten lo hacen 8690 veces y corresponde a las barras BA01T002SE036T002 y BA02T003SE004T003. Además la cantidad promedio de repeticiones por barra corresponde a 4238, por otro lado tan solo un 25% de las barras tienen menos de 4345 repeticiones.
+
+## P2 - Construcción de variables
+
+### Construcción de variables desviacion, desviacion_pct y desviacion_cat
+
+```{r,echo=FALSE}
+costo_marginal[,c("desviacion","desviacion_pct"):=.(costo_en_pesos-costo,(costo_en_pesos-costo)/costo_en_pesos)]
+costo_marginal[,desviacion_cat:=ifelse(abs(desviacion_pct)>0.15,1,0) %>% as.factor()]
+```
+
+Tras realizar generar las variables solicitadas se obtuvo el siguiente data frame:
+
+```{r ,echo=FALSE}
+head(costo_marginal) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+De forma adicional se contruiran las variables camada y date_ymdh ya que seran utiliadas para los puntos siguientes.
+
+1. camada: ID mes 
+2. date_ymdh: Fecha en formato Y-m-d h:m:s
+
+```{r, echo=TRUE}
+costo_marginal[,c("camada","date_ymdh"):=.(as.Date(fecha,'%Y-%m-%d') %>% format('%Y-%m-01') %>% as.Date(), 
+                                           as.POSIXct(as.character(fecha),"UTC")+hours(hora))]
+```
+
+Visualización nueva base de datos:
+
+```{r ,echo=FALSE}
+head(costo_marginal) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+### Análisis descriptivo desv_cat 
+
+**Gráfica de barras desviación cat por camada**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+df_plot <- costo_marginal[!is.na(desviacion_cat),.("n"=.N),by=c("camada","desviacion_cat")] 
+ggplot(df_plot, aes(fill=desviacion_cat, y=n, x=camada)) + geom_bar(position="stack", stat="identity")+ggtitle("Distribución desviacion_cat por camada")
+```
+
+Se puede visualizar que a lo largo de las camadas la moda es una desviación entre el costo real y programado mayor al 15% en aquellas observaciones que poseen un costo programado, las cuales corresponden a un 20.9% del dataset
+
+Para analizar si existe alguna tendencia temporal de la desviación categórica, gráficaremos la serie de tiempo por camada de los la proporción de casos cuya desviación entre el costo real y programado fue inferior al 15% (desc_cat igual a cero).
+
+**Serie de tiempo proporción de casos con una desviacion entre el costo real y programado es inferior al 15%**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+df_plot <- costo_marginal %>% mutate(x=1,desviacion_cat=paste0("desv_",desviacion_cat)) 
+df_plot <- dcast(df_plot, fecha ~ desviacion_cat, value.var = "x" ,fun.aggregate=sum,na.rm=TRUE)
+df_plot <- df_plot %>% mutate(p=(desv_0/(desv_1+desv_0)))
+ggplot(df_plot , aes(x=fecha, y=p)) + geom_line(col="blue") + ggtitle(" Serie de Tiempo prop desviacion absoluta menor al 15%")
+```
+
+Se puede visualizar una tendencia a la baja a lo largo de los meses, exto indicaría que la porporcion de casos con una desviacion entre el costo real y programado es superior al 15% se encuentra al alza. 
+
+## P3 - Visualización de Datos
+
+A continuación se presenta el script de la función time_plot_costo_barra: 
+
+```{r,echo=TRUE,warning=FALSE}
+time_plot_costo_barra <- function(codigo_barra,fecha_inicial,fecha_final,df=costo_marginal){
+  df <- df %>% filter(barra_mnemotecnico==codigo_barra & date_ymdh>=as.Date(fecha_inicial) & date_ymdh<=as.Date(fecha_final)) 
+  df <- df %>% select(date_ymdh,costo,costo_en_pesos) %>% gather("cm", "value", -date_ymdh) 
+  ggplot(df, aes(x=date_ymdh, y=value, col=cm)) + geom_line() + ggtitle(paste0("Serie de tiempo costo marginal real y programado ",codigo_barra))
+}
+```
+
+Las gráficas solicitadas se presentan a continuación:
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 28, fig.height = 14, fig.show = "hold"}
+codigos <- c("BA01T002SE036T002","BA02T003SE004T003","BA83L131SE134L131","BA01G004SE008G004")
+plots <- map(codigos,~time_plot_costo_barra(.x,"2019-01-24","2019-07-01"))
+
+plot_grid(plots[[1]],plots[[2]],plots[[3]],plots[[4]])
+```
+
+Se puede visualizar en que en aquellas barras que poseen un costo programado, en general este es superior al costo real. 
+
+**Eliminación barra con cmg_real igual a cero durante todos los días**
+
+```{r,echo=TRUE,warning=FALSE}
+costo_marginal[,sum_cmg_real:=sum(costo_en_pesos),by="barra_mnemotecnico"]
+costo_marginal <- costo_marginal[sum_cmg_real!=0,]
+```
+
+```{r ,echo=FALSE,include=FALSE}
+# limpieza memoria
+rm(df_plot);rm(dist_barra);rm(h1);rm(h2);rm(M);rm(plots);gc()
+```
+
+## P4 - Base para modelos 
+
+### Descripción Dataset
+ 
+Visulización del dataset:
+
+```{r ,echo=FALSE}
+df_pred <- fread('~/Desktop/test/files/base_para_prediccion.csv') %>% data.table()
+df_pred %>% head() %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+La llave primaria de las observaciones del dataset se compone por las variables nemotecnico_se - fecha	- hora, por lo demás el resto de las variables corresponden a variables de tipo númericas.
+
+**Dimensiones dataset**
+
+```{r ,echo=FALSE}
+M <- matrix(ncol=2,nrow=1)
+M[1,] <- c(nrow(df_pred),ncol(df_pred))
+colnames(M) <- c("num filas","num col")
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+### Creación nuevas variables
+
+```{r, echo=TRUE,warning=FALSE}
+df_pred[,c("anno","mes","semana","dia","dia_semana"):=list(lubridate::year(fecha),lubridate::month(fecha),
+                                                                     lubridate::week(fecha),lubridate::day(fecha),
+                                                                     base::weekdays(fecha %>% as.Date()))]
+df_pred[,"weekend":=ifelse(dia_semana %in% c("Saturday","Sunday"),1,0)]    
+```
+
+El dataset resultante esta dado por:
+
+```{r ,echo=FALSE}
+head(df_pred) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+### Implementación series de tiempo diarias por subestacion
+
+```{r,echo=TRUE}
+plot_daily_series_sub_estation <- function(dates,subestacion,variable,df=df_pred){
+  plot_sub_estation <- function(date,subestacion,variable,df=df_pred){
+    df <- df[fecha==as.Date(date) & nemotecnico_se==subestacion,] 
+    df[,date_ymdh:=as.POSIXct(as.character(fecha),"UTC")+hours(hora)]
+    ggplot(df , aes(x=date_ymdh, y=get(variable))) + geom_line(color="blue") + ggtitle(paste0(" Serie de Tiempo subestacion: ",subestacion,' - Fecha:',date))
+  }
+  map(dates,~plot_sub_estation(.x,subestacion,variable))
+}
+```
+
+### Grafica curva de generación térmica y solar
+
+De forma adicional se añadira la función:
+
+```{r,echo=TRUE,warning=FALSE}
+plot_ts_sub_estacion <- function(date_min,date_max,subestacion,variable,df=df_pred){
+    df <- df[fecha<=as.Date(date_max) & fecha>=as.Date(date_min) & nemotecnico_se==subestacion,] 
+    df[,date_ymdh:=as.POSIXct(as.character(fecha),"UTC")+hours(hora)]
+    ggplot(df , aes(x=date_ymdh, y=get(variable))) + geom_line(color="#69b3a2") + ggtitle(paste0(" Serie de Tiempo ",variable,"  subestacion: ",subestacion))
+}
+
+```
+
+#### Generación solar
+
+**Sub estación SE005T002** 
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plot_ts_sub_estacion('2019-01-10','2019-01-14','SE005T002','gen_solar_total_mwh')
+```
+
+Se puede visualizar que la generación térmica de la subestación térmica posee una conducta estacional, presentando valores superiores a cero entre las 9 y 21 horas aproximadamente.
+
+De forma analoga se utilizará la función solicitada en el punto anterior. 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plots <- plot_daily_series_sub_estation(c(as.Date('2019-01-10')+days(1:4)),'SE005T002','gen_solar_total_mwh')
+plot_grid(plots[[1]],plots[[2]],plots[[3]],plots[[4]])
+```
+
+**Sub estación SE127T005** 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plot_ts_sub_estacion('2019-01-10','2019-01-14','SE127T005','gen_solar_total_mwh')
+```
+
+La subestación SE127T005 presenta una estacionalidad menos marcada que la subestación SE005T002, por otro lado en términos de magnitudes su generación térmica es mucho menor.
+
+De forma analoga se utilizará la función solicitada en el punto anterior. 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plots <- plot_daily_series_sub_estation(c(as.Date('2019-01-10')+days(1:4)),'SE127T005','gen_solar_total_mwh')
+plot_grid(plots[[1]],plots[[2]],plots[[3]],plots[[4]])
+```
+
+
+#### Generación térmica
+
+**Sub estación SE020G213** 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plot_ts_sub_estacion('2019-05-14','2019-05-17','SE020G213','gen_termica_total_mwh')
+```
+
+A diferencia de la generación solar no existe una estacionalidad aparente en la serie de tiempo.
+
+
+De forma analoga se utilizará la función solicitada en el punto anterior. 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plots <- plot_daily_series_sub_estation(c(as.Date('2019-05-14')+days(1:3)),'SE020G213','gen_termica_total_mwh')
+plot_grid(plots[[1]],plots[[2]],plots[[3]])
+```
+
+**Sub estación SE106G216** 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plot_ts_sub_estacion('2019-05-14','2019-05-17','SE106G216','gen_termica_total_mwh')
+```
+
+
+La serie de tiempo presenta una observación posiblemente atipica durante una hora del día 15 de mayo, si se excluyese dicha observación esta presentaria un comportamiento homocedástico.
+
+De forma analoga se utilizará la función solicitada en el punto anterior. 
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+plots <- plot_daily_series_sub_estation(c(as.Date('2019-05-14')+days(1:3)),'SE106G216','gen_termica_total_mwh')
+plot_grid(plots[[1]],plots[[2]],plots[[3]])
+```
+
+## P5 - Predicción de desviaciones del costo marginal: modelo 1
+
+### Crear variable target
+
+Dicha variable sera denominada "flag"
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+df_pred[,flag:=ifelse(abs(cmg_desv_pct)>15,1,0)]
+```
+
+Luego, debemos considerar que habrian observaciones que podrían generar ruido en nuestro modelo:
+
+1. Casos donde el costo programado o real sea igual a cero 
+1. Casos donde el costo programado o real sea igual a NA
+
+Por lo tanto incluiremos una corrección de la variable flag:
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 21, fig.height = 7, fig.show = "hold"}
+df_pred[,flag:=ifelse((is.na(cmg_real) | cmg_real==0 | is.na(cmg_prog) | cmg_prog==0),NA,flag)]
+```
+
+Visualización del dataset: 
+
+```{r ,echo=FALSE}
+head(df_pred) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+### Creación de features 
+
+Antes de proceder con la creación de features, se completaran las fechas en formato y-m-d h:m:s y sub estaciones que podrían faltar, con el objetivo de poder carcular más adelante nuestra variable de respuesta. 
+
+```{r ,echo=TRUE}
+df_pred[,c("date_ymdh","original"):=list(as.POSIXct(as.character(fecha),"UTC")+hours(hora),1)]
+all_dates <- seq(from=as.POSIXct(as.character(min(df_pred$fecha)),"UTC"),to=as.POSIXct(as.character(max(df_pred$fecha)),"UTC"), by="hour")
+dt <- tidyr::crossing(nemotecnico_se=unique(df_pred$nemotecnico_se),date_ymdh = all_dates) %>% data.table()
+df_pred <- dt %>% left_join(df_pred,by=c('nemotecnico_se','date_ymdh')) %>% data.table()
+rm(dt)
+```
+
+Visualización del dataset: 
+
+```{r ,echo=FALSE}
+head(df_pred) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F) %>%  scroll_box(width = "100%")
+```
+
+Nueva dimensión del dataset:
+
+```{r ,echo=FALSE}
+M <- matrix(ncol=2,nrow=1)
+M[1,] <- c(nrow(df_pred),ncol(df_pred))
+colnames(M) <- c("num filas","num col")
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+**Generación de variables**
+
+Generaremos variables de tipo cuadrátics y cubicas, con el objetivo de caputar variaciones no linales en nuestras covariables. 
+
+```{r,echo=TRUE,warning=FALSE}
+vars_num <- df_pred %>% select(starts_with("gen"),starts_with("cmg"),demanda_mwh,cap_inst_mw) %>% names()
+eleva <- function(x,n){x**n}
+df_pred <- df_pred %>% mutate_at(vars(all_of(vars_num)), .funs = list(cuad = ~eleva(.x,2))) 
+df_pred <- df_pred %>% mutate_at(vars(all_of(vars_num)), .funs = list(cub = ~eleva(.x,3))) 
+```
+
+Luego anadiremos estadísticos descriptivos agrupados por hora de las distintas covariables, con el obtevito de que captural el escenario general de la red en nuestros features. 
+
+```{r,echo=TRUE,warning=FALSE}
+vars_num <- c(vars_num,paste0(vars_num,"_cuad"),paste0(vars_num,"_cub"))
+df_pred <- df_pred %>% group_by(date_ymdh) %>% mutate_at(vars(all_of(vars_num)), .funs = list(mean = ~mean(.x,na.rm = TRUE))) 
+df_pred <- df_pred %>% group_by(date_ymdh) %>% mutate_at(vars(all_of(vars_num)), .funs = list(sd = ~sd(.x,na.rm = TRUE))) 
+df_pred <- df_pred %>% group_by(date_ymdh) %>% mutate_at(vars(all_of(vars_num)), .funs = list(median = ~median(.x,na.rm = TRUE))) 
+df_pred <- df_pred %>% group_by(date_ymdh) %>% mutate_at(vars(all_of(vars_num)), .funs = list(sum = ~sum(.x,na.rm = TRUE))) %>% data.table()
+```
+
+Obteniendo el siguiente dataframe:
+
+```{r,echo=FALSE,warning=FALSE}
+rm(vars_num);gc()
+df_pred %>% head() %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)  %>%  scroll_box(width = "100%")
+```
+
+Nueva dimensión del dataset:
+
+```{r ,echo=FALSE}
+M <- matrix(ncol=2,nrow=1)
+M[1,] <- c(nrow(df_pred),ncol(df_pred))
+colnames(M) <- c("num filas","num col")
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+### Entrenar el modelo 
+
+**Defición de la variable de respuesta**
+
+$$ Y_k = \left \{ \begin{matrix} 1 & \mbox{Desviacion en el tiempo t+k}
+\\ 0 & \mbox{Sin desviacion en el tiempo t+k}\end{matrix}\right. $$
+
+Cabe destacar que nuestros features deben estar posicionados en un tiempo $t$. Para el caso del modelo 1 se debe fijar $k=1$ y para el modelo dos $k=12$.
+
+**Creación de la variable de respuesta**
+
+Con el objetivo de optimizar el codigo se generaran las variables de respuesta para el modelo 1 y 2.
+
+```{r,echo=TRUE,warning=FALSE}
+df_pred <- df_pred[order(nemotecnico_se,-date_ymdh)]
+df_pred[,c("hora","mes","dia","fecha","anno","semana"):=NULL]
+df_pred <- df_pred %>% setnames(old='date_ymdh',new='date_x')
+
+df_pred[,c("Y","Y2"):=list(lag(flag,1),lag(flag,12)),by="nemotecnico_se"] 
+df_pred[,c("flag","weekend","date_y"):=list(as.character(flag),as.character(weekend),date_x+hours(1))]
+df_pred[,camada:=as.Date(date_y) %>% format('%Y-%m-01') %>% as.Date()]
+```
+
+Además eliminaremos las observaciones que tengan valores nulos en su variable de respuesta u valores extraños en las covariables cmg_prog y cmg_real (las cuales se observan en el tiempo $t$).
+
+```{r,echo=TRUE,warning=FALSE}
+df_pred_M1 <- df_pred[!is.na(Y) & !is.na(cmg_prog) & !is.na(cmg_real) & cmg_prog!=0 & cmg_real!=0 & original==1,]   #df modelo 1
+df_pred_M2 <- df_pred[!is.na(Y2) & !is.na(cmg_prog) & !is.na(cmg_real) & cmg_prog!=0 & cmg_real!=0 & original==1,]  #df modelo 2
+```
+
+**Tasa de observaciones con desviaciones**
+```{r,echo=TRUE,warning=FALSE}
+df_pred_M1[,.(p=mean(Y),n1=sum(Y),N=length(Y))] %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+**Entrenamiento del Modelo**
+
+Definiremos algunas funciones que se utilizaran más adelante: 
+
+```{r,echo=TRUE,warning=FALSE}
+df_test_train <- function(df,Y_name,param){
+  res <- NULL
+  res$df <- df
+  res$df[,target:=get(Y_name)]
+  res$df <- res$df[original==1,]
+  res$df[,c("date_x","date_y"):=NULL]
+  # test 
+  obs_test <- sample(seq_len(nrow(res$df)), size = floor(param$p_test*nrow(res$df)))
+  res$df_test <- res$df[obs_test]
+  res$df_test[,target:=NULL]
+  # train
+  res$df_train <- res$df[-1*obs_test]
+  n1 <- sum(res$df_train$target);n0 <- ((n1*param$downsampling)/(1-param$downsampling)) %>% round()
+  res$df_train <- res$df_train[c(which(res$df_train$target==0) %>% sample(n0,replace=TRUE),which(res$df_train$target==1))]
+  res$df_train[,target:=NULL]
+  res$df[,target:=NULL]
+  res
+}
+
+perf_metrics <- function(Y,pred){
+  res <- NULL
+  res$M_conf <- ModelMetrics::confusionMatrix(Y,pred) 
+  res$auc <- ModelMetrics::auc(Y,pred) 
+  res$tpr <- ModelMetrics::tpr(Y,pred) 
+  res$ks <- ks_stat(Y,pred) 
+  res
+}
+
+tasa_clasif_correcta <- function(Y,pred,treshold){ 
+ M <- matrix(ncol=2,nrow=1)
+ M[1,1] <- ModelMetrics::tpr(Y,pred,treshold)
+ M[1,2] <- ModelMetrics::tnr(Y,pred,treshold)
+ colnames(M) <- c("tpr","tnr")  
+ M
+}
+
+```
+
+**Def Parametros**
+
+```{r,echo=TRUE,warning=FALSE}
+param <- NULL
+param$p_test <- 0.2
+param$downsampling <- 0.5  
+param$importancia <- 0.95
+param$var_names <- (df_pred %>% select(-c(Y,Y2,camada,nemotecnico_se,date_y,date_x))) %>% names()
+```
+
+**Obtención data train y test**
+
+```{r,echo=TRUE,warning=FALSE}
+df_modeling_Y1 <- df_test_train(df_pred_M1,"Y",param)
+```
+
+Sanity Check Media Y 
+
+```{r,echo=FALSE,warning=FALSE}
+M <- matrix(nrow=1,ncol=2)
+M[1,1] <- df_modeling_Y1$df_train$Y %>% mean();M[1,2] <- df_modeling_Y1$df_test$Y %>% mean()
+colnames(M) <- c("Train","Test")
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+**Entrenamiento del Modelo**
+
+1. En una primera instancia se entrenara una regresión logística regularizada con el fin de disminuir eliminar las variables que no contribuyan a nuestro modelo. Por otro lado, de descarto la posibilidad de utilizar comonentes principales para disminuir la dimensionalidad del problema ya que generaría resultados poco accionables para el problema planteado. 
+
+
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+h2o.init(min_mem_size = '1G', max_mem_size = '6G')
+```
+
+Pasamos las datas de train y test a h2o:
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+test_M1 <- as.h2o(df_modeling_Y1$df_test, destination_frame = 'test')
+train_M1  <- as.h2o(df_modeling_Y1$df_train, destination_frame = 'train')
+```
+
+Planteamos el modelo regularizado y seleccionamos las variables más importantes hasta sumar ciero umbral de importancia acumulada, obteniendo las siguientes variables a incluir en nuestro modelo:
+
+```{r,echo=TRUE,warning=FALSE,results='hide'}
+model_reg_M1 <- h2o.glm(y = 'Y', x = param$var_names, training_frame = train_M1, seed = 1234,family = 'binomial',
+                     alpha = 1, lambda_search =  TRUE, nlambdas = 2000, max_active_predictors = 20 ,model_id = "model_reg_M1",
+                     remove_collinear_columns = TRUE)
+```
+```{r,echo=TRUE,warning=FALSE}
+vars_M1 <- h2o::h2o.varimp(model_reg_M1) %>% mutate(perCumSum =cumsum(percentage)) %>% filter(perCumSum<param$importancia)
+vars_M1 <- vars_M1$variable %>% as.character()
+vars_M1
+```
+
+2. Utilizamos las variables ya elegidas y planteamos un modelo de regresión logística. 
+
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+model_M1 <- h2o.glm(y = 'Y',x = vars_M1,training_frame = train_M1,validation_frame = test_M1,seed = 1234,
+                    family = 'binomial',lambda=0,compute_p_values = T,model_id = "model_M1",
+                    remove_collinear_columns = TRUE)
+
+```
+
+**Evaluación de la performance**
+
+Para evaluar nuestro modelo utilizaremos las siguientes metricas AUC, KS y también pondemos atención a la matriz de confución. 
+
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+pred_M1 <- (h2o.predict(object = model_M1, newdata = test_M1)$p1) %>% as.vector() %>% as.numeric()
+Y_M1 <- df_modeling_Y1$df_test$Y
+per_M1 <- perf_metrics(Y_M1,pred_M1)
+```
+
+Obtenemos las siguientes métricas en test:
+
+```{r,echo=FALSE,warning=FALSE}
+M <- matrix(ncol=3,nrow=1)
+colnames(M) <- c("auc","ks","tpr")
+M[1,1] <- per_M1$auc;M[1,2] <- per_M1$ks;M[1,3] <- per_M1$tpr
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+Podemos concluir que:
+
+1. Basandonos en el AUC, si escogemos una observacion al azar la probabilidad de clasificarlo correctamente es de 0.79
+2. El KS es superior a 0.4 lo que nos indicaría que la capacidad discriminatoria del modelo basandose en las distribución de "buenos" y "malos" es adecuada.
+3. La tasa de de positivos predichos correctamente usando un threshold de 0.5 es baja por lo cual sería adecuado replantear un punto de corte. 
+
+**Gráfica AUC**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+rocit(score=pred_M1,class=Y_M1) %>% plot()
+```
+**Gráfica KS**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+rocit(score=pred_M1,class=Y_M1) %>% ksplot()
+```
+
+Ahora veremos como se comporta usando otro threshold:
+
+**Threshold 0.5**
+
+```{r ,echo=TRUE}
+ModelMetrics::confusionMatrix(Y_M1,pred_M1,0.5)
+```
+
+Tasas de Clasificación correctas:
+
+```{r ,echo=FALSE}
+tasa_clasif_correcta(Y_M1,pred_M1,0.5) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+
+**Threshold 0.43**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+ModelMetrics::confusionMatrix(Y_M1,pred_M1,0.43)
+```
+
+```{r ,echo=FALSE}
+tasa_clasif_correcta(Y_M1,pred_M1,0.43) %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+Se puede visualizar que el modelo tendría una capacidad predictiva adecuada utilizando un threshold de 0.43
+
+## P6 - Predicción de desviaciones del costo marginal: modelo 2
+
+### Modelamiento
+
+Para plantear el modelo dos se utilizará un random forest con todas las variables y luego se elegiran las mas imporantes las cuales seran las covariables de nuestro modelo real, a continuación se presentan dichas variables  
+
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+
+# Definir parametros ------------------------------------------------------
+
+param$p_test <- 0.2
+param$downsampling <- 0.5  
+param$importancia <- 0.1
+
+# Downsampling ------------------------------------------------------------
+
+df_modeling_M2 <- df_test_train(df_pred_M2,"Y2",param)
+df_modeling_M2$df_train <- df_modeling_M2$df_train[,Y2:=factor(Y2,levels=c("0","1"))]
+df_modeling_M2$df_test <- df_modeling_M2$df_test[,Y2:=factor(Y2,levels=c("0","1"))]
+df_modeling_M2$df_train[,fecha:=NULL]
+df_modeling_M2$df_test[,fecha:=NULL]
+
+# Datas H2O ---------------------------------------------------------------
+
+test_M2 <- as.h2o(df_modeling_M2$df_test, destination_frame = 'test')
+train_M2  <- as.h2o(df_modeling_M2$df_train, destination_frame = 'train')
+
+# Random forest -----------------------------------------------------------
+
+# Modelo con todas las variables
+
+model_M2 <- h2o.randomForest(y = 'Y2',x = c(param$var_names),training_frame = train_M2,validation_frame = test_M2, 
+                             seed = 123,stopping_metric ="mean_per_class_error",nfolds = 0)
+```
+
+
+```{r,echo=TRUE,warning=FALSE}
+# Seleccion de variables más importantes
+vars_M2 <- h2o::h2o.varimp(model_M2) %>% as.data.frame() %>% mutate(perCumSum=cumsum(percentage %>% as.numeric())) %>% filter(perCumSum<param$importancia)
+vars_M2 <- vars_M2$variable %>% as.character()
+vars_M2
+
+```
+
+**Modelo Real**
+
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+model_M2 <- h2o.randomForest(y = 'Y2', x = c(vars_M2), training_frame = train_M2, validation_frame = test_M2, seed = 123,
+                             stopping_metric ="mean_per_class_error",nfolds = 0,model_id = "model_M2")
+
+```
+
+**Métricas de Perfomance en Test**
+
+```{r,echo=TRUE,warning=FALSE}
+pred_M2 <- (h2o.predict(object = model_M2, newdata = test_M2)$p1) %>% as.vector() %>% as.numeric()
+Y_M2 <- df_modeling_M2$df_test$Y2
+per_M2 <- perf_metrics(Y_M2,pred_M2)
+```
+
+```{r,echo=FALSE,warning=FALSE}
+M <- matrix(ncol=3,nrow=1)
+colnames(M) <- c("auc","ks","tpr")
+M[1,1] <- per_M2$auc;M[1,2] <- per_M2$ks;M[1,3] <- per_M2$tpr
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+**Matriz de Confusión**
+
+```{r,echo=FALSE,warning=FALSE}
+per_M2$M_conf
+```
+
+Si bien el auc es alto, este modelo tiene nivel de clasificación malo por lo cual no se recomienda su uso.
+
+## P7 - Predicción de desviaciones del costo marginal: modelo 2
+
+La base de datos de clima posee el promedio diario de varias series de tiempo, como el problema de clasificación tiene por objetivo predecir lo que ocurrira cada 12 horas, no se podrían utilizar las covariables haciendo un cruze directo por fecha pero si podrían utilizarse utilizando las covariables de lo que ocurrio el día anterior al de nuestra prediccion, por lo cual se le restara un día a la variable fecha antes de hacer el cruze. 
+
+```{r,echo=TRUE,warning=FALSE}
+
+# Leer data ---------------------------------------------------------------
+
+df_clima <- fread('~/Desktop/test/files/datos_clima.csv') %>% data.table()
+df_clima[,fecha:= fecha %>% as.POSIXct("UTC") %>% floor_date("day")-days(1)]
+
+# Left join y calculo de nuevas covariables -------------------------------
+
+vars_clima <- df_clima %>% select(-c(fecha,subestacion)) %>% names()
+
+df_pred_M2[,fecha:=date_x %>% as.POSIXct("UTC") %>% floor_date("day")]
+df_pred_M3 <- df_pred_M2 %>% left_join(df_clima,by=c('nemotecnico_se'='subestacion','fecha')) %>% data.table()
+df_pred_M3 <- df_pred_M3 %>% mutate_at(vars(vars_clima), .funs = list(cuad = ~eleva(.x,2))) 
+df_pred_M3 <- df_pred_M3 %>% mutate_at(vars(vars_clima), .funs = list(cub = ~eleva(.x,3))) 
+
+vars_clima <- c(vars_clima,paste0(vars_clima,'_cuad'),paste0(vars_clima,'_cub'))
+
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(mean = ~mean(.x,na.rm = TRUE))) 
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(sd = ~sd(.x,na.rm = TRUE))) 
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(median = ~median(.x,na.rm = TRUE))) 
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(sum = ~sum(.x,na.rm = TRUE))) %>% data.table()
+df_pred_M3[,fecha:=NULL]
+```
+
+### Modelamiento
+
+En un comienzo utilizaremos un random forest cojn todas las covariables y seleccionaremos las más importantes para plantear un modelo final.
+
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+# Modelo ------------------------------------------------------------------
+
+# definir parametros 
+param$p_test <- 0.2
+param$downsampling <- 0.5 
+param$importancia <- 0.15
+
+# Donwsampling ------------------------------------------------------------
+
+df_modeling_M3 <- df_test_train(df_pred_M3,"Y2",param)
+df_modeling_M3$df_train <- df_modeling_M3$df_train[,Y2:=factor(Y2,levels=c("0","1"))]
+df_modeling_M3$df_train <- df_modeling_M3$df_train[,Y2:=factor(Y2,levels=c("0","1"))]
+
+# Datas h2o ---------------------------------------------------------------
+
+test_M3 <- as.h2o(df_modeling_M3$df_test, destination_frame = 'test')
+train_M3  <- as.h2o(df_modeling_M3$df_train, destination_frame = 'train')
+
+# Random forest -----------------------------------------------------------
+
+model_M3 <- h2o.randomForest(y = 'Y2', x = c(param$var_names,vars_clima), training_frame = train_M3, validation_frame = test_M3, seed = 123,
+                 stopping_metric ="mean_per_class_error",nfolds = 0)
+```
+
+
+```{r,echo=TRUE,warning=FALSE}
+vars_M3 <- h2o::h2o.varimp(model_M3) %>% as.data.frame() %>% mutate(perCumSum=cumsum(percentage %>% as.numeric())) %>% filter(perCumSum<param$importancia)
+vars_M3 <- vars_M3$variable %>% as.character()
+vars_M3
+```
+
+
+**Modelo**
+
+```{r,echo=TRUE,warning=FALSE}
+
+# Leer data ---------------------------------------------------------------
+
+df_clima <- fread('~/Desktop/test/files/datos_clima.csv') %>% data.table()
+df_clima[,fecha:= fecha %>% as.POSIXct("UTC") %>% floor_date("day")-days(1)]
+
+# Left join y calculo de nuevas covariables -------------------------------
+
+vars_clima <- df_clima %>% select(-c(fecha,subestacion)) %>% names()
+
+df_pred_M2[,fecha:=date_x %>% as.POSIXct("UTC") %>% floor_date("day")]
+df_pred_M3 <- df_pred_M2 %>% left_join(df_clima,by=c('nemotecnico_se'='subestacion','fecha')) %>% data.table()
+df_pred_M3 <- df_pred_M3 %>% mutate_at(vars(vars_clima), .funs = list(cuad = ~eleva(.x,2))) 
+df_pred_M3 <- df_pred_M3 %>% mutate_at(vars(vars_clima), .funs = list(cub = ~eleva(.x,3))) 
+
+vars_clima <- c(vars_clima,paste0(vars_clima,'_cuad'),paste0(vars_clima,'_cub'))
+
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(mean = ~mean(.x,na.rm = TRUE))) 
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(sd = ~sd(.x,na.rm = TRUE))) 
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(median = ~median(.x,na.rm = TRUE))) 
+df_pred_M3 <- df_pred_M3 %>% group_by(fecha) %>% mutate_at(vars(vars_clima), .funs = list(sum = ~sum(.x,na.rm = TRUE))) %>% data.table()
+df_pred_M3[,fecha:=NULL]
+```
+
+En un comienzo utilizaremos un random forest cojn todas las covariables y seleccionaremos las más importantes para plantear un modelo final.
+
+**Modelo**
+```{r,echo=TRUE,warning=FALSE,results = 'hide'}
+model_M3 <- h2o.randomForest(y = 'Y2', x = c(vars_M3), training_frame = train_M3, validation_frame = test_M3, seed = 123,
+                             stopping_metric ="mean_per_class_error",nfolds = 0,model_id = "model_M3")
+```
+
+### Performance del Modelo
+```{r,echo=TRUE,warning=FALSE}
+pred_M3 <- (h2o.predict(object = model_M3, newdata = test_M3)$p1) %>% as.vector() %>% as.numeric()
+Y_M3 <- df_modeling_M3$df_test$Y2
+per_M3 <- perf_metrics(Y_M3,pred_M3)
+```
+
+```{r,echo=FALSE,warning=FALSE}
+M <- matrix(ncol=3,nrow=1)
+colnames(M) <- c("auc","ks","tpr")
+M[1,1] <- per_M3$auc;M[1,2] <- per_M3$ks;M[1,3] <- per_M3$tpr
+M %>% kable() %>% kable_styling(bootstrap_options = "striped",position="center",full_width = F)
+```
+
+**Matriz de confución**
+
+```{r,echo=FALSE,warning=FALSE}
+per_M3$M_conf
+```
+
+Podemos concluir que:
+
+1. Basandonos en el AUC, si escogemos una observacion al azar la probabilidad de clasificarlo correctamente es de 0.97
+2. El KS es superior a 0.85 lo que nos indicaría que la capacidad discriminatoria del modelo basandose en las distribución de "buenos" y "malos" es buena.
+3. La tasa de de positivos predichos correctamente usando un threshold de 0.5 es alta.
+
+**Gráfica AUC**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+rocit(score=pred_M3,class=Y_M3) %>% plot()
+```
+
+**Gráfica KS**
+
+```{r ,echo=TRUE,warning=FALSE,fig.width = 5, fig.height = 5, fig.show = "hold"}
+rocit(score=pred_M3,class=Y_M3) %>% ksplot()
+```
+
+## P8 - Reflexion
+
+### ¿Por qué sería bueno utilizar un modelo como este para anticiparse a desvíos de precios de la energía?
+
+Al saber si existira una diferencia entre el costo programado y el real se podría generar un accionable para monitoriar los insights más importantes que podrían producir esta diferencia y mantenerlos bajo control. 
+
+### ¿Qué casos de uso te imaginas podrían beneficiarse teniendo acceso a un modelo como este?
+
+2. Identificar los nodos que generan más desviaciones en el sistema y analizar utilizando conocimiento experto si estos tuvieran algún incombeniente
+3. Se podría generar un modelo que estime si existira una desviación al día siguiente utilizando la info de una ventana de tiempo mucho mayor en las covariables (aplicando un modelo LSTM), esto podría ser útil para dar mas tiempo de acción a los teams encargados del funcionamiento de los nodos.
+4. Se podría generar un modelo para estimar el gasto energetico y ver si este se adecua más al costo programado, además se podría entregar una predicción adicional del la desviación en base a este nuevo modelo. 
+
+
+
+
+
+
+
+
+
+
